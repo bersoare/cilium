@@ -16,12 +16,14 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/vishvananda/netlink"
 	"go4.org/netipx"
+	"golang.org/x/sys/unix"
 	kube_types "k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/netns"
+	"github.com/cilium/cilium/pkg/networkdriver/types"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -89,6 +91,14 @@ func (driver *Driver) RunPodSandbox(ctx context.Context, podSandbox *api.PodSand
 						return err
 					}
 					if err := netlink.LinkSetUp(l); err != nil {
+						return err
+					}
+
+					if err := driver.setDirectRoutes(l, a.Config.DirectRoutes); err != nil {
+						return err
+					}
+
+					if err := driver.setRoutes(l, a.Config.Routes); err != nil {
 						return err
 					}
 
@@ -206,6 +216,51 @@ func (driver *Driver) configureIPs(l netlink.Link, action ipamAction, ipv4, ipv6
 	}
 
 	return errors.Join(errs...)
+}
+
+func (driver *Driver) setRoutes(l netlink.Link, routes types.RouteSet) error {
+	var (
+		errs error
+	)
+
+	for dst, gwList := range routes {
+		route := netlink.Route{
+			LinkIndex: l.Attrs().Index,
+			Dst:       netipx.PrefixIPNet(dst),
+		}
+
+		for gw := range gwList {
+			route.MultiPath = append(route.MultiPath, &netlink.NexthopInfo{LinkIndex: l.Attrs().Index, Gw: gw.AsSlice()})
+		}
+
+		if err := netlink.RouteAppend(&route); err != nil {
+			errs = errors.Join(errs, err)
+		}
+
+	}
+
+	return errs
+}
+
+func (driver *Driver) setDirectRoutes(l netlink.Link, routes types.PrefixSet) error {
+	var (
+		errs error
+	)
+
+	for dst := range routes {
+		route := netlink.Route{
+			LinkIndex: l.Attrs().Index,
+			Dst:       netipx.PrefixIPNet(dst),
+			Scope:     unix.RT_SCOPE_LINK,
+		}
+
+		if err := netlink.RouteAppend(&route); err != nil {
+			errs = errors.Join(errs, err)
+		}
+
+	}
+
+	return errs
 }
 
 func (driver *Driver) startNRI(ctx context.Context) error {

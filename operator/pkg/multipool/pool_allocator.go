@@ -27,6 +27,20 @@ type cidrPool struct {
 	v6         []cidralloc.CIDRAllocator
 	v4MaskSize int
 	v6MaskSize int
+	metadata   PoolMetadata
+}
+
+// PoolMetadata contains network configuration metadata for a pool
+type PoolMetadata struct {
+	VlanID       *int32
+	Routes       []RouteSpec
+	DirectRoutes []string
+}
+
+// RouteSpec defines a network route
+type RouteSpec struct {
+	Destination string
+	Gateway     string
 }
 
 type cidrSet map[netip.Prefix]struct{}
@@ -99,11 +113,12 @@ type PoolAllocator struct {
 
 	ipv4Enabled, ipv6Enabled bool
 
-	mutex   lock.RWMutex
-	pools   map[string]cidrPool    // poolName -> pool
-	nodes   map[string]poolToCIDRs // nodeName -> pool -> cidrs
-	orphans map[string]poolToCIDRs // nodeName -> pool -> list of orphaned CIDRs (CIDRs allocated to nodes but missing their parent pool)
-	ready   bool
+	mutex    lock.RWMutex
+	pools    map[string]cidrPool    // poolName -> pool
+	metadata map[string]PoolMetadata // poolName -> metadata
+	nodes    map[string]poolToCIDRs // nodeName -> pool -> cidrs
+	orphans  map[string]poolToCIDRs // nodeName -> pool -> list of orphaned CIDRs (CIDRs allocated to nodes but missing their parent pool)
+	ready    bool
 }
 
 func NewPoolAllocator(logger *slog.Logger, enableIPv4, enableIPv6 bool) *PoolAllocator {
@@ -112,6 +127,7 @@ func NewPoolAllocator(logger *slog.Logger, enableIPv4, enableIPv6 bool) *PoolAll
 		ipv4Enabled: enableIPv4,
 		ipv6Enabled: enableIPv6,
 		pools:       map[string]cidrPool{},
+		metadata:    map[string]PoolMetadata{},
 		nodes:       map[string]poolToCIDRs{},
 		orphans:     map[string]poolToCIDRs{},
 	}
@@ -307,6 +323,34 @@ func (p *PoolAllocator) UpsertPool(poolName string, ipv4CIDRs []string, ipv4Mask
 	return p.reconcileOrphanCIDRs(poolName, v4, v6)
 }
 
+// UpsertPoolWithMetadata upserts a pool with network metadata (vlan, routes)
+func (p *PoolAllocator) UpsertPoolWithMetadata(poolName string, ipv4CIDRs []string, ipv4MaskSize int, ipv6CIDRs []string, ipv6MaskSize int, metadata PoolMetadata) error {
+	// First upsert the pool CIDRs
+	if err := p.UpsertPool(poolName, ipv4CIDRs, ipv4MaskSize, ipv6CIDRs, ipv6MaskSize); err != nil {
+		return err
+	}
+
+	// Then store the metadata
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.metadata[poolName] = metadata
+
+	return nil
+}
+
+// GetPoolMetadata returns the metadata for a pool
+func (p *PoolAllocator) GetPoolMetadata(poolName string) (vlanID *int32, routes []RouteSpec, directRoutes []string) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	metadata, exists := p.metadata[poolName]
+	if !exists {
+		return nil, nil, nil
+	}
+
+	return metadata.VlanID, metadata.Routes, metadata.DirectRoutes
+}
+
 // DeletePool deletes a pool from p. No new allocations to nodes will be made
 // from the pool and all internal bookkeeping is removed. However, nodes will
 // still retain their in-flight CIDRs until next time the respective CiliumNode
@@ -339,6 +383,7 @@ func (p *PoolAllocator) DeletePool(poolName string) error {
 	}
 
 	delete(p.pools, poolName)
+	delete(p.metadata, poolName)
 	return nil
 }
 

@@ -115,6 +115,57 @@ func UpsertPool(allocator *PoolAllocator, name string, v4Spec *cilium_v2alpha1.I
 	)
 }
 
+// UpsertPoolWithMetadata upserts a pool with network metadata from CRD
+func UpsertPoolWithMetadata(allocator *PoolAllocator, name string, v4Spec *cilium_v2alpha1.IPv4PoolSpec, v6Spec *cilium_v2alpha1.IPv6PoolSpec, vlanID *int32, routes []cilium_v2alpha1.RouteSpec) error {
+	var ipv4CIDRs, ipv6CIDRs []string
+	var ipv4MaskSize, ipv6MaskSize int
+	var directRoutes []string
+
+	if v4Spec != nil {
+		ipv4MaskSize = int(v4Spec.MaskSize)
+		ipv4CIDRs = make([]string, len(v4Spec.CIDRs))
+		for i, cidr := range v4Spec.CIDRs {
+			ipv4CIDRs[i] = string(cidr)
+			// Derive direct routes from IPv4 CIDRs
+			directRoutes = append(directRoutes, string(cidr))
+		}
+	}
+
+	if v6Spec != nil {
+		ipv6MaskSize = int(v6Spec.MaskSize)
+		ipv6CIDRs = make([]string, len(v6Spec.CIDRs))
+		for i, cidr := range v6Spec.CIDRs {
+			ipv6CIDRs[i] = string(cidr)
+			// Derive direct routes from IPv6 CIDRs
+			directRoutes = append(directRoutes, string(cidr))
+		}
+	}
+
+	// Convert CRD RouteSpec to internal RouteSpec
+	internalRoutes := make([]RouteSpec, len(routes))
+	for i, route := range routes {
+		internalRoutes[i] = RouteSpec{
+			Destination: route.Destination,
+			Gateway:     route.Gateway,
+		}
+	}
+
+	metadata := PoolMetadata{
+		VlanID:       vlanID,
+		Routes:       internalRoutes,
+		DirectRoutes: directRoutes,
+	}
+
+	return allocator.UpsertPoolWithMetadata(
+		name,
+		ipv4CIDRs,
+		ipv4MaskSize,
+		ipv6CIDRs,
+		ipv6MaskSize,
+		metadata,
+	)
+}
+
 func DeletePool(allocator *PoolAllocator, name string) error {
 	return allocator.DeletePool(name)
 }

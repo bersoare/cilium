@@ -44,14 +44,15 @@ func driverPluginPath(driverName string) string {
 }
 
 type Driver struct {
-	kubeClient     kubernetes.Interface
-	draPlugin      *kubeletplugin.Helper
-	nriPlugin      stub.Stub
-	logger         *slog.Logger
-	lock           lock.Mutex
-	jg             job.Group
-	resourceClaims resource.Resource[*resourceapi.ResourceClaim]
-	pods           resource.Resource[*corev1.Pod]
+	kubeClient      kubernetes.Interface
+	draPlugin       *kubeletplugin.Helper
+	nriPlugin       stub.Stub
+	logger          *slog.Logger
+	lock            lock.Mutex
+	jg              job.Group
+	resourceClaims  resource.Resource[*resourceapi.ResourceClaim]
+	pods            resource.Resource[*corev1.Pod]
+	resourceIPPools resource.Resource[*v2alpha1.CiliumResourceIPPool]
 
 	configCRD resource.Resource[*v2alpha1.CiliumNetworkDriverNodeConfig]
 	config    *v2alpha1.CiliumNetworkDriverNodeConfigSpec
@@ -404,6 +405,62 @@ func (driver *Driver) restoreDevices(ctx context.Context) error {
 // Start retrieves and validates the configuration. If configuration is found and valid, it
 // initializes all the devicemanagers that are enabled by config, and starts the DRA + NRI registration.
 func (driver *Driver) Start(ctx cell.HookContext) error {
+	// Start watching CiliumResourceIPPool CRDs to populate pool metadata
+	if driver.resourceIPPools != nil && driver.multiPoolMgr != nil {
+		driver.jg.Add(job.OneShot("network-driver-pool-metadata-watcher", func(ctx context.Context, _ cell.Health) error {
+			driver.logger.InfoContext(ctx, "Starting CiliumResourceIPPool metadata watcher")
+
+			for ev := range driver.resourceIPPools.Events(ctx) {
+				switch ev.Kind {
+				case resource.Sync:
+					driver.logger.InfoContext(ctx, "CiliumResourceIPPool resources synchronized")
+				case resource.Upsert:
+					// Update pool metadata in MultiPoolManager
+					pool := ev.Object
+					routes := make([]ipam.RouteSpec, len(pool.Spec.Routes))
+					for i, r := range pool.Spec.Routes {
+						routes[i] = ipam.RouteSpec{
+							Destination: r.Destination,
+							Gateway:     r.Gateway,
+						}
+					}
+
+					// Derive direct routes from pool CIDRs
+					var directRoutes []string
+					if pool.Spec.IPv4 != nil {
+						for _, cidr := range pool.Spec.IPv4.CIDRs {
+							directRoutes = append(directRoutes, string(cidr))
+						}
+					}
+					if pool.Spec.IPv6 != nil {
+						for _, cidr := range pool.Spec.IPv6.CIDRs {
+							directRoutes = append(directRoutes, string(cidr))
+						}
+					}
+
+					driver.multiPoolMgr.SetPoolMetadata(
+						ipam.Pool(pool.Name),
+						pool.Spec.VlanID,
+						routes,
+						directRoutes,
+					)
+					driver.logger.DebugContext(ctx, "Updated pool metadata",
+						logfields.PoolName, pool.Name,
+						"vlanID", pool.Spec.VlanID,
+						"routes", len(routes),
+						"directRoutes", len(directRoutes),
+					)
+				case resource.Delete:
+					// Clear metadata for deleted pool
+					driver.multiPoolMgr.SetPoolMetadata(ipam.Pool(ev.Object.Name), nil, nil, nil)
+					driver.logger.DebugContext(ctx, "Removed pool metadata", logfields.PoolName, ev.Object.Name)
+				}
+				ev.Done(nil)
+			}
+			return nil
+		}))
+	}
+
 	driver.jg.Add(job.OneShot("network-driver-main", func(ctx context.Context, _ cell.Health) error {
 
 		if version.Version().LT(semver.Version{Major: 1, Minor: 34}) {

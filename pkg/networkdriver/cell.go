@@ -38,6 +38,7 @@ var Cell = cell.Module(
 		ciliumNetworkDriverConfigResource,
 		resourceClaimResource,
 		podResource,
+		ciliumResourceIPPoolResource,
 	),
 	resourceIPAM,
 	cell.Invoke(registerNetworkDriver),
@@ -46,15 +47,16 @@ var Cell = cell.Module(
 type networkDriverParams struct {
 	cell.In
 
-	Log            *slog.Logger
-	Lifecycle      cell.Lifecycle
-	ClientSet      k8sClient.Clientset
-	JobGroup       job.Group
-	Configs        resource.Resource[*v2alpha1.CiliumNetworkDriverNodeConfig]
-	ResourceClaims resource.Resource[*resourceapi.ResourceClaim]
-	Pods           resource.Resource[*corev1.Pod]
-	MultiPoolMgr   *ipam.MultiPoolManager
-	DaemonCfg      *option.DaemonConfig
+	Log              *slog.Logger
+	Lifecycle        cell.Lifecycle
+	ClientSet        k8sClient.Clientset
+	JobGroup         job.Group
+	Configs          resource.Resource[*v2alpha1.CiliumNetworkDriverNodeConfig]
+	ResourceClaims   resource.Resource[*resourceapi.ResourceClaim]
+	Pods             resource.Resource[*corev1.Pod]
+	ResourceIPPools  resource.Resource[*v2alpha1.CiliumResourceIPPool]
+	MultiPoolMgr     *ipam.MultiPoolManager
+	DaemonCfg        *option.DaemonConfig
 }
 
 func ciliumNetworkDriverConfigResource(cs k8sClient.Clientset, lc cell.Lifecycle, mp workqueue.MetricsProvider, daemonCfg *option.DaemonConfig) resource.Resource[*v2alpha1.CiliumNetworkDriverNodeConfig] {
@@ -112,20 +114,37 @@ func podResource(
 	), nil
 }
 
+func ciliumResourceIPPoolResource(
+	lc cell.Lifecycle,
+	cs k8sClient.Clientset,
+	mp workqueue.MetricsProvider,
+	daemonCfg *option.DaemonConfig,
+) (resource.Resource[*v2alpha1.CiliumResourceIPPool], error) {
+	if !cs.IsEnabled() || !daemonCfg.EnableCiliumNetworkDriver {
+		return nil, nil
+	}
+	lw := utils.ListerWatcherWithModifiers(utils.ListerWatcherFromTyped(cs.CiliumV2alpha1().CiliumResourceIPPools()))
+	return resource.New[*v2alpha1.CiliumResourceIPPool](
+		lc, lw, mp,
+		resource.WithMetric("CiliumResourceIPPool"),
+	), nil
+}
+
 func registerNetworkDriver(params networkDriverParams) *Driver {
 	driver := &Driver{
-		logger:         params.Log,
-		lock:           lock.Mutex{},
-		jg:             params.JobGroup,
-		resourceClaims: params.ResourceClaims,
-		pods:           params.Pods,
-		kubeClient:     params.ClientSet,
-		deviceManagers: make(map[types.DeviceManagerType]types.DeviceManager),
-		configCRD:      params.Configs,
-		allocations:    make(map[kube_types.UID]map[kube_types.UID][]allocation),
-		multiPoolMgr:   params.MultiPoolMgr,
-		ipv4Enabled:    params.DaemonCfg.IPv4Enabled(),
-		ipv6Enabled:    params.DaemonCfg.IPv6Enabled(),
+		logger:          params.Log,
+		lock:            lock.Mutex{},
+		jg:              params.JobGroup,
+		resourceClaims:  params.ResourceClaims,
+		pods:            params.Pods,
+		resourceIPPools: params.ResourceIPPools,
+		kubeClient:      params.ClientSet,
+		deviceManagers:  make(map[types.DeviceManagerType]types.DeviceManager),
+		configCRD:       params.Configs,
+		allocations:     make(map[kube_types.UID]map[kube_types.UID][]allocation),
+		multiPoolMgr:    params.MultiPoolMgr,
+		ipv4Enabled:     params.DaemonCfg.IPv4Enabled(),
+		ipv6Enabled:     params.DaemonCfg.IPv6Enabled(),
 	}
 
 	params.Lifecycle.Append(driver)

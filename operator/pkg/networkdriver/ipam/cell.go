@@ -20,8 +20,11 @@ var Cell = cell.Module(
 
 	cell.ProvidePrivate(
 		ciliumResourceIPPool,
+		newPoolAllocator,
 	),
-	cell.Invoke(registerAllocator),
+	cell.Invoke(
+		registerAllocator,
+	),
 )
 
 type Config struct {

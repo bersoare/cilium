@@ -138,6 +138,20 @@ func (driver *Driver) deviceClaimConfigs(ctx context.Context, claim *resourceapi
 				)
 				return nil, fmt.Errorf("failed to unmarshal config for %s: %w", path.Join(claim.Namespace, claim.Name), err)
 			}
+
+			// Validate: if ip-pool is specified, vlan/routes/directRoutes cannot be manually set
+			if c.IPPool != "" {
+				if c.Vlan != 0 {
+					return nil, fmt.Errorf("vlan-id cannot be specified when ip-pool is set in config for %s", path.Join(claim.Namespace, claim.Name))
+				}
+				if len(c.Routes) > 0 {
+					return nil, fmt.Errorf("routes cannot be specified when ip-pool is set in config for %s", path.Join(claim.Namespace, claim.Name))
+				}
+				if len(c.DirectRoutes) > 0 {
+					return nil, fmt.Errorf("direct-routes cannot be specified when ip-pool is set in config for %s", path.Join(claim.Namespace, claim.Name))
+				}
+			}
+
 			for _, request := range cfg.Requests {
 				devicesCfg[request] = c
 			}
@@ -153,6 +167,7 @@ func (driver *Driver) addrsForDevice(ctx context.Context, device string, cfg typ
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("no IP pool found in config for device %s", device)
 	}
 
+	// Allocate IPs locally from CIDR blocks assigned by operator
 	if err := resiliency.Retry(ctx, AddrAddRetryInterval, AddrAddMaxRetries, func(ctx context.Context, retries int) (bool, error) {
 		var errs []error
 		if v4Needed && !v4Addr.IsValid() {
@@ -166,6 +181,7 @@ func (driver *Driver) addrsForDevice(ctx context.Context, device string, cfg typ
 				}
 				v4Addr = addr
 			}
+
 		}
 		if v6Needed && !v6Addr.IsValid() {
 			res, err := driver.multiPoolMgr.AllocateNext(device, ipam.Pool(cfg.IPPool), ipam.IPv6, true)
@@ -286,6 +302,65 @@ func (driver *Driver) prepareResourceClaim(ctx context.Context, claim *resourcea
 		}
 		if v6Needed {
 			thisAlloc.Config.IPv6Addr = netip.PrefixFrom(v6Addr, v6Addr.BitLen())
+		}
+
+		// Populate Config from pool metadata if IPPool is specified
+		if cfg.IPPool != "" {
+			vlanID, routes, directRoutes := driver.multiPoolMgr.GetPoolMetadata(ipam.Pool(cfg.IPPool))
+
+			// Apply VLAN ID from pool
+			if vlanID != nil {
+				thisAlloc.Config.Vlan = uint16(*vlanID)
+			}
+
+			// Convert and apply routes from pool
+			if routes != nil {
+				thisAlloc.Config.Routes = make(types.RouteSet)
+				for _, route := range routes {
+					destPrefix, err := netip.ParsePrefix(route.Destination)
+					if err != nil {
+						driver.logger.WarnContext(ctx, "invalid route destination, skipping",
+							logfields.PoolName, cfg.IPPool,
+							"destination", route.Destination,
+							logfields.Error, err,
+						)
+						continue
+					}
+
+					// Create gateway address set
+					gwSet := types.AddrSet{}
+					if route.Gateway != "" {
+						gwAddr, err := netip.ParseAddr(route.Gateway)
+						if err != nil {
+							driver.logger.WarnContext(ctx, "invalid route gateway, using empty gateway",
+								logfields.PoolName, cfg.IPPool,
+								"gateway", route.Gateway,
+								logfields.Error, err,
+							)
+						} else {
+							gwSet[gwAddr] = struct{}{}
+						}
+					}
+					thisAlloc.Config.Routes[destPrefix] = gwSet
+				}
+			}
+
+			// Convert and apply direct routes from pool
+			if directRoutes != nil {
+				thisAlloc.Config.DirectRoutes = make(types.PrefixSet)
+				for _, directRoute := range directRoutes {
+					destPrefix, err := netip.ParsePrefix(directRoute)
+					if err != nil {
+						driver.logger.WarnContext(ctx, "invalid direct route destination, skipping",
+							logfields.PoolName, cfg.IPPool,
+							"destination", directRoute,
+							logfields.Error, err,
+						)
+						continue
+					}
+					thisAlloc.Config.DirectRoutes[destPrefix] = struct{}{}
+				}
+			}
 		}
 
 		if err := thisAlloc.Device.Setup(thisAlloc.Config); err != nil {

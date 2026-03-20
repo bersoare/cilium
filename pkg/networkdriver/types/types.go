@@ -7,6 +7,7 @@ import (
 	"encoding"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 
@@ -136,16 +137,140 @@ type DeviceManagerConfig interface {
 	IsEnabled() bool
 }
 
+type PrefixSet map[netip.Prefix]struct{}
+
+// MarshalJSON serializes PrefixSet as an array of prefix strings
+func (p PrefixSet) MarshalJSON() ([]byte, error) {
+	if p == nil {
+		return []byte("null"), nil
+	}
+
+	list := make([]string, 0, len(p))
+	for prefix := range p {
+		list = append(list, prefix.String())
+	}
+	return json.Marshal(list)
+}
+
+// UnmarshalJSON deserializes PrefixSet from an array of prefix strings
+func (p *PrefixSet) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*p = nil
+		return nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+
+	*p = make(PrefixSet)
+	for _, prefixStr := range list {
+		prefix, err := netip.ParsePrefix(prefixStr)
+		if err != nil {
+			return fmt.Errorf("invalid prefix %q: %w", prefixStr, err)
+		}
+		(*p)[prefix] = struct{}{}
+	}
+	return nil
+}
+
 type RouteSet map[netip.Prefix]AddrSet
 
-type AddrSet map[netip.Prefix]struct{}
+// MarshalJSON serializes RouteSet as a dict keyed by prefix with array of gateway prefixes as values
+func (r RouteSet) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
+
+	m := make(map[string][]string)
+	for dest, gateways := range r {
+		gwList := make([]string, 0, len(gateways))
+		for gw := range gateways {
+			gwList = append(gwList, gw.String())
+		}
+		m[dest.String()] = gwList
+	}
+	return json.Marshal(m)
+}
+
+// UnmarshalJSON deserializes RouteSet from a dict keyed by prefix with array of gateway prefixes
+func (r *RouteSet) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*r = nil
+		return nil
+	}
+
+	var m map[string][]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+
+	*r = make(RouteSet)
+	for destStr, gwStrs := range m {
+		dest, err := netip.ParsePrefix(destStr)
+		if err != nil {
+			return fmt.Errorf("invalid destination prefix %q: %w", destStr, err)
+		}
+
+		gwSet := make(AddrSet)
+		for _, gwStr := range gwStrs {
+			gw, err := netip.ParseAddr(gwStr)
+			if err != nil {
+				return fmt.Errorf("invalid gateway prefix %q: %w", gwStr, err)
+			}
+			gwSet[gw] = struct{}{}
+		}
+		(*r)[dest] = gwSet
+	}
+	return nil
+}
+
+type AddrSet map[netip.Addr]struct{}
+
+// MarshalJSON serializes AddrSet as an array of prefix strings
+func (a AddrSet) MarshalJSON() ([]byte, error) {
+	if a == nil {
+		return []byte("null"), nil
+	}
+
+	list := make([]string, 0, len(a))
+	for prefix := range a {
+		list = append(list, prefix.String())
+	}
+	return json.Marshal(list)
+}
+
+// UnmarshalJSON deserializes AddrSet from an array of strings
+func (a *AddrSet) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*a = nil
+		return nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+
+	*a = make(AddrSet)
+	for _, addrStr := range list {
+		prefix, err := netip.ParseAddr(addrStr)
+		if err != nil {
+			return fmt.Errorf("invalid prefix %q: %w", addrStr, err)
+		}
+		(*a)[prefix] = struct{}{}
+	}
+	return nil
+}
 
 type DeviceConfig struct {
-	IPv4Addr netip.Prefix `json:"ipv4Addr"`
-	IPv6Addr netip.Prefix `json:"ipv6Addr"`
-	IPPool   string       `json:"ip-pool"`
-	Routes   RouteSet
-	Vlan     uint16
+	IPv4Addr     netip.Prefix `json:"ipv4Addr"`
+	IPv6Addr     netip.Prefix `json:"ipv6Addr"`
+	IPPool       string       `json:"ip-pool"`
+	Routes       RouteSet     `json:"routes"`
+	DirectRoutes PrefixSet    `json:"direct-routes"`
+	Vlan         uint16       `json:"vlan-id"`
 }
 
 func (d *DeviceConfig) Empty() bool {
@@ -153,6 +278,7 @@ func (d *DeviceConfig) Empty() bool {
 		d.IPv6Addr == (netip.Prefix{}) &&
 		d.IPPool == "" &&
 		d.Routes == nil &&
+		d.DirectRoutes == nil &&
 		d.Vlan == 0
 }
 

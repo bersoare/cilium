@@ -63,6 +63,19 @@ type poolPair struct {
 	v6 *cidrPool
 }
 
+// PoolMetadata contains network configuration metadata for a pool
+type PoolMetadata struct {
+	VlanID       *int32
+	Routes       []RouteSpec
+	DirectRoutes []string
+}
+
+// RouteSpec defines a network route
+type RouteSpec struct {
+	Destination string
+	Gateway     string
+}
+
 type preAllocatePerPool map[Pool]int
 
 func ParseMultiPoolPreAllocMap(conf map[string]string) (preAllocatePerPool, error) {
@@ -247,6 +260,7 @@ type MultiPoolManager struct {
 
 	poolsMutex      lock.Mutex
 	pools           map[Pool]*poolPair
+	poolMetadata    map[Pool]PoolMetadata // Pool metadata (vlan, routes, etc.)
 	poolsUpdated    chan struct{}
 	finishedRestore map[Family]bool
 
@@ -275,6 +289,7 @@ func NewMultiPoolManager(p MultiPoolManagerParams) *MultiPoolManager {
 		preallocatedIPsPerPool: p.PreallocMap,
 		pendingIPsPerPool:      newPendingAllocationsPerPool(p.Logger),
 		pools:                  map[Pool]*poolPair{},
+		poolMetadata:           map[Pool]PoolMetadata{},
 		poolsUpdated:           make(chan struct{}, 1),
 		jobGroup:               p.JobGroup,
 		k8sUpdater:             job.NewTrigger(job.WithDebounce(p.CiliumNodeUpdateRate)),
@@ -774,4 +789,29 @@ func (m *MultiPoolManager) setNode(node *ciliumv2.CiliumNode) *ciliumv2.CiliumNo
 	oldNode := m.node
 	m.node = node
 	return oldNode
+}
+
+// SetPoolMetadata stores metadata for a pool (vlan, routes, directRoutes)
+func (m *MultiPoolManager) SetPoolMetadata(poolName Pool, vlanID *int32, routes []RouteSpec, directRoutes []string) {
+	m.poolsMutex.Lock()
+	defer m.poolsMutex.Unlock()
+
+	m.poolMetadata[poolName] = PoolMetadata{
+		VlanID:       vlanID,
+		Routes:       routes,
+		DirectRoutes: directRoutes,
+	}
+}
+
+// GetPoolMetadata retrieves metadata for a pool
+func (m *MultiPoolManager) GetPoolMetadata(poolName Pool) (vlanID *int32, routes []RouteSpec, directRoutes []string) {
+	m.poolsMutex.Lock()
+	defer m.poolsMutex.Unlock()
+
+	metadata, exists := m.poolMetadata[poolName]
+	if !exists {
+		return nil, nil, nil
+	}
+
+	return metadata.VlanID, metadata.Routes, metadata.DirectRoutes
 }

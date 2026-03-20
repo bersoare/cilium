@@ -29,6 +29,14 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 )
 
+type PoolAllocatorParams struct {
+	cell.In
+
+	Logger    *slog.Logger
+	Clientset k8sClient.Clientset
+	DaemonCfg *option.DaemonConfig
+}
+
 type AllocatorParams struct {
 	cell.In
 
@@ -38,9 +46,19 @@ type AllocatorParams struct {
 	Clientset             k8sClient.Clientset
 	CiliumResourceIPPools resource.Resource[*cilium_v2alpha1_api.CiliumResourceIPPool]
 	CiliumNodes           resource.Resource[*cilium_v2_api.CiliumNode]
+	Allocator             *multipool.PoolAllocator
 
 	DaemonCfg *option.DaemonConfig
 	Cfg       Config
+}
+
+func newPoolAllocator(p PoolAllocatorParams) *multipool.PoolAllocator {
+	if !p.Clientset.IsEnabled() || !p.DaemonCfg.EnableCiliumNetworkDriver {
+		return nil
+	}
+
+	logger := p.Logger.With([]any{logfields.LogSubsys, "network-driver-ipam-allocator"}...)
+	return multipool.NewPoolAllocator(logger, p.DaemonCfg.EnableIPv4, p.DaemonCfg.EnableIPv6)
 }
 
 func registerAllocator(p AllocatorParams) {
@@ -50,7 +68,10 @@ func registerAllocator(p AllocatorParams) {
 
 	logger := p.Logger.With([]any{logfields.LogSubsys, "network-driver-ipam-allocator"}...)
 
-	allocator := multipool.NewPoolAllocator(logger, p.DaemonCfg.EnableIPv4, p.DaemonCfg.EnableIPv6)
+	allocator := p.Allocator
+
+	// Create pool selector to manage pool-to-node mappings based on nodeSelector
+	poolSelector := NewPoolSelector(logger)
 
 	nodeHandler := multipool.NewNodeHandler(
 		"network-driver-ipam-sync",
@@ -89,11 +110,22 @@ func registerAllocator(p AllocatorParams) {
 									logger.InfoContext(ctx, "All CiliumResourceIPPool resources synchronized")
 									close(poolSynced)
 								case resource.Upsert:
-									err = multipool.UpsertPool(allocator, ev.Object.Name, ev.Object.Spec.IPv4, ev.Object.Spec.IPv6)
+									// Register pool with PoolAllocator
+									err = multipool.UpsertPoolWithMetadata(allocator, ev.Object.Name, ev.Object.Spec.IPv4, ev.Object.Spec.IPv6, ev.Object.Spec.VlanID, ev.Object.Spec.Routes)
 									action = "upsert"
+
+									// Also register with PoolSelector for nodeSelector filtering
+									if err == nil {
+										poolSelector.UpsertPool(ev.Object)
+									}
 								case resource.Delete:
 									err = multipool.DeletePool(allocator, ev.Object.Name)
 									action = "delete"
+
+									// Also remove from PoolSelector
+									if err == nil {
+										poolSelector.DeletePool(ev.Object.Name)
+									}
 								}
 								ev.Done(err)
 								if err != nil {
@@ -113,8 +145,11 @@ func registerAllocator(p AllocatorParams) {
 									logger.InfoContext(ctx, "All CiliumNode resources synchronized")
 									close(nodeSynced)
 								case resource.Upsert:
+									// Recalculate allowed pools for this node based on its labels
+									poolSelector.RecalculateNode(ev.Object)
 									nodeHandler.Upsert(ev.Object)
 								case resource.Delete:
+									poolSelector.RemoveNode(ev.Object.Name)
 									nodeHandler.Delete(ev.Object)
 								}
 								ev.Done(nil)
