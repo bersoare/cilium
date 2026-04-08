@@ -146,6 +146,10 @@ type DeviceConfig struct {
 	IPPool   string       `json:"ip-pool"`
 	Routes   RouteSet
 	Vlan     uint16
+	// VfDriver specifies the driver to bind the VF to when it is allocated.
+	// If empty, the VF is left on its existing kernel driver.
+	// Example: "vfio-pci" for DPDK/userspace workloads.
+	VfDriver string `json:"vfDriver,omitempty"`
 }
 
 func (d *DeviceConfig) Empty() bool {
@@ -153,7 +157,8 @@ func (d *DeviceConfig) Empty() bool {
 		d.IPv6Addr == (netip.Prefix{}) &&
 		d.IPPool == "" &&
 		d.Routes == nil &&
-		d.Vlan == 0
+		d.Vlan == 0 &&
+		d.VfDriver == ""
 }
 
 type SerializedDevice struct {

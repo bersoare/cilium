@@ -48,6 +48,14 @@ type PciDevice struct {
 	PfName          string
 	VfID            int
 	KernelIfaceName string
+	// OriginalDriver is the driver the VF was bound to before Setup() switched
+	// it to a userspace driver. It is persisted in the ResourceClaim (via
+	// MarshalBinary/UnmarshalBinary) so that Free() can restore it even after
+	// an agent restart.
+	OriginalDriver string `json:"OriginalDriver,omitempty"`
+	// driverBinder abstracts sysfs PCI driver operations. It is not serialized;
+	// it is re-injected by the SRIOVManager after deserialization.
+	driverBinder DriverBinder `json:"-"`
 }
 
 func (p PciDevice) GetAttrs() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
@@ -75,17 +83,27 @@ func (d PciDevice) KernelIfName() string {
 }
 
 // Setup prepares a sr-iov VF device for use.
-func (d PciDevice) Setup(config types.DeviceConfig) error {
+// If config.VfDriver is set, the VF is unbound from its current kernel driver
+// and bound to the specified userspace driver (e.g. "vfio-pci"). The original
+// driver name is saved in d.OriginalDriver so that Free() can restore it.
+func (d *PciDevice) Setup(config types.DeviceConfig) error {
 	if d.PfName == "" {
 		return fmt.Errorf("device with ifname %s %w", d.IfName(), errNotAVF)
 	}
 
-	l, err := safenetlink.LinkByName(d.PfName)
-	if err != nil {
-		return err
+	if config.VfDriver != "" {
+		prev, err := d.driverBinder.BindDriver(d.Addr, config.VfDriver)
+		if err != nil {
+			return fmt.Errorf("binding VF %s to driver %s: %w", d.Addr, config.VfDriver, err)
+		}
+		d.OriginalDriver = prev
 	}
 
 	if config.Vlan != 0 {
+		l, err := safenetlink.LinkByName(d.PfName)
+		if err != nil {
+			return err
+		}
 		return netlink.LinkSetVfVlan(l, d.VfID, int(config.Vlan))
 	}
 
@@ -93,18 +111,29 @@ func (d PciDevice) Setup(config types.DeviceConfig) error {
 }
 
 // Free resets a sr-iov VF device.
-func (d PciDevice) Free(config types.DeviceConfig) error {
+// If the device was previously bound to a userspace driver (indicated by
+// d.OriginalDriver being set), it is unbound and rebound to the original
+// kernel driver.
+func (d *PciDevice) Free(config types.DeviceConfig) error {
 	if d.PfName == "" {
 		return fmt.Errorf("device with ifname %s %w", d.IfName(), errNotAVF)
 	}
 
-	l, err := safenetlink.LinkByName(d.PfName)
-	if err != nil {
-		return err
+	if config.Vlan != 0 {
+		l, err := safenetlink.LinkByName(d.PfName)
+		if err != nil {
+			return err
+		}
+		if err := netlink.LinkSetVfVlan(l, d.VfID, 0); err != nil {
+			return err
+		}
 	}
 
-	if config.Vlan != 0 {
-		return netlink.LinkSetVfVlan(l, d.VfID, 0)
+	if d.OriginalDriver != "" {
+		if _, err := d.driverBinder.BindDriver(d.Addr, d.OriginalDriver); err != nil {
+			return fmt.Errorf("restoring driver %s on VF %s: %w", d.OriginalDriver, d.Addr, err)
+		}
+		d.OriginalDriver = ""
 	}
 
 	return nil
@@ -273,6 +302,7 @@ func (mgr *SRIOVManager) RestoreDevice(data []byte) (types.Device, error) {
 	if err := dev.UnmarshalBinary(data); err != nil {
 		return nil, err
 	}
+	dev.driverBinder = newSysfsDriverBinder(mgr.sysPath)
 	return &dev, nil
 }
 
@@ -356,7 +386,8 @@ func isVF(sysPath, pciAddr string) bool {
 // is the kernel ifname, which may or may not be present depending on the driver in use.
 func (mgr *SRIOVManager) parseDevice(addr string, netlinkAttrs map[PCIAddr]netlink.LinkAttrs) (*PciDevice, error) {
 	dev := PciDevice{
-		Addr: addr,
+		Addr:         addr,
+		driverBinder: newSysfsDriverBinder(mgr.sysPath),
 	}
 
 	thisLinkAttrs, ok := netlinkAttrs[PCIAddr(addr)]
