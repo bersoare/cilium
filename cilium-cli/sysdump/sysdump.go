@@ -1848,6 +1848,8 @@ func (c *Collector) Run() error {
 		tasks = append(tasks, c.getBGPControlPlaneTasks()...)
 	}
 
+	serialTasks = append(serialTasks, c.networkDriverTask())
+
 	// First, run each serial task in its own workerpool.
 	var r []workerpool.Task
 	for i, t := range serialTasks {
@@ -2328,6 +2330,83 @@ func (c *Collector) getBGPControlPlaneTasks() []Task {
 		collectCiliumV2OrV2Alpha1Resource(c, "ciliumbgpadvertisements", "Cilium BGP Advertisements"),
 		collectCiliumV2OrV2Alpha1Resource(c, "ciliumbgpnodeconfigs", "Cilium BGP Node Configs"),
 		collectCiliumV2OrV2Alpha1Resource(c, "ciliumbgpnodeconfigoverrides", "Cilium BGP Node Config Overrides"),
+	}
+}
+
+// networkDriverTask returns a task to collect all the cilium network driver crds and
+// related information.
+func (c *Collector) networkDriverTask() Task {
+	return Task{
+		Description: "Collecting Cilium Network Driver information",
+		Quick:       true,
+		Task: func(ctx context.Context) error {
+			nodeCfgs, err := c.Client.ListUnstructured(ctx, schema.GroupVersionResource{
+				Group:    "cilium.io",
+				Resource: "ciliumnetworkdrivernodeconfigs",
+				Version:  "v2alpha1",
+			}, nil, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+
+			if err := c.WriteYAML(fmt.Sprintf(ciliumNetworkDriverFileName, "nodeconfigs"), nodeCfgs); err != nil {
+				return err
+			}
+
+			resourceSlices, err := c.Client.ListUnstructured(ctx, schema.GroupVersionResource{
+				Group:    "resource.k8s.io",
+				Resource: "resourceslices",
+				Version:  "v1",
+			}, nil, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+
+			if err := c.WriteYAML(fmt.Sprintf(ciliumNetworkDriverFileName, "resourceslices"), resourceSlices); err != nil {
+				return err
+			}
+
+			deviceClasses, err := c.Client.ListUnstructured(ctx, schema.GroupVersionResource{
+				Group:    "resource.k8s.io",
+				Resource: "deviceclasses",
+				Version:  "v1",
+			}, nil, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+
+			if err := c.WriteYAML(fmt.Sprintf(ciliumNetworkDriverFileName, "deviceclasses"), deviceClasses); err != nil {
+				return err
+			}
+
+			resourceClaims, err := c.Client.ListUnstructured(ctx, schema.GroupVersionResource{
+				Group:    "resource.k8s.io",
+				Resource: "resourceclaims",
+				Version:  "v1",
+			}, nil, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+
+			if err := c.WriteYAML(fmt.Sprintf(ciliumNetworkDriverFileName, "resourceclaims"), resourceClaims); err != nil {
+				return err
+			}
+
+			resourceClaimTemplates, err := c.Client.ListUnstructured(ctx, schema.GroupVersionResource{
+				Group:    "resource.k8s.io",
+				Resource: "resourceclaimtemplates",
+				Version:  "v1",
+			}, nil, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+
+			if err := c.WriteYAML(fmt.Sprintf(ciliumNetworkDriverFileName, "resourceclaimTemplates"), resourceClaimTemplates); err != nil {
+				return err
+			}
+
+			return nil
+		},
 	}
 }
 
